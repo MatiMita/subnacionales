@@ -2,18 +2,18 @@ import React, { useState, useEffect } from 'react';
 import {
     Save,
     Plus,
-    Minus,
     CheckCircle,
     ClipboardCheck,
    ShieldCheck,
-    RotateCcw,
     X,
     MapPin,
     Building2,
     Grid3x3,
     ChevronRight,
     FileText,
-    ArrowLeft
+    ArrowLeft,
+    Image,
+    Upload
 } from 'lucide-react';
 
 const Transcripcion = () => {
@@ -40,6 +40,10 @@ const Transcripcion = () => {
     const [votosNulos, setVotosNulos] = useState(0);
     const [votosBlancos, setVotosBlancos] = useState(0);
     const [observaciones, setObservaciones] = useState('');
+    
+    // Imagen del acta
+    const [imagenActa, setImagenActa] = useState(null);
+    const [previewImagen, setPreviewImagen] = useState(null);
 
     const API_URL = import.meta.env.VITE_API_URL;
 
@@ -131,18 +135,41 @@ const Transcripcion = () => {
         setCurrentStep(4);
     };
 
-    const updateVotos = (tipo, idFrente, delta) => {
+    const updateVotos = (tipo, idFrente, value) => {
         const setVotos = tipo === 'alcalde' ? setVotosAlcalde : setVotesConcejal;
         setVotos(prev => prev.map(v =>
-            v.id_frente === idFrente ? { ...v, cantidad: Math.max(0, v.cantidad + delta) } : v
+            v.id_frente === idFrente ? { ...v, cantidad: Math.max(0, value) } : v
         ));
     };
-
-    const resetVotos = (tipo, idFrente) => {
-        const setVotos = tipo === 'alcalde' ? setVotosAlcalde : setVotesConcejal;
-        setVotos(prev => prev.map(v =>
-            v.id_frente === idFrente ? { ...v, cantidad: 0 } : v
-        ));
+    
+    const handleImagenChange = (e) => {
+        const file = e.target.files[0];
+        if (file) {
+            // Validar tamaño (máx 10MB)
+            if (file.size > 10 * 1024 * 1024) {
+                alert('La imagen no debe superar los 10MB');
+                return;
+            }
+            
+            // Validar tipo
+            if (!['image/jpeg', 'image/jpg', 'image/png', 'application/pdf'].includes(file.type)) {
+                alert('Solo se permiten imágenes JPG, PNG o PDF');
+                return;
+            }
+            
+            setImagenActa(file);
+            
+            // Crear preview solo para imágenes
+            if (file.type.startsWith('image/')) {
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                    setPreviewImagen(reader.result);
+                };
+                reader.readAsDataURL(file);
+            } else {
+                setPreviewImagen('pdf');
+            }
+        }
     };
 
     const handleRegistrarActa = async () => {
@@ -150,21 +177,29 @@ const Transcripcion = () => {
 
         try {
             const token = localStorage.getItem('token');
+            
+            // Usar FormData para enviar imagen
+            const formData = new FormData();
+            formData.append('id_mesa', selectedMesa.id_mesa);
+            formData.append('id_tipo_eleccion', 1);
+            formData.append('votos_nulos', votosNulos);
+            formData.append('votos_blancos', votosBlancos);
+            formData.append('observaciones', observaciones);
+            formData.append('votos_alcalde', JSON.stringify(votosAlcalde.filter(v => v.cantidad > 0)));
+            formData.append('votos_concejal', JSON.stringify(votosConcejal.filter(v => v.cantidad > 0)));
+            
+            // Agregar imagen si existe
+            if (imagenActa) {
+                formData.append('imagen_acta', imagenActa);
+            }
+            
             const response = await fetch(`${API_URL}/votos/registrar-acta`, {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/json',
                     'Authorization': `Bearer ${token}`
+                    // NO incluir Content-Type, FormData lo maneja automáticamente
                 },
-                body: JSON.stringify({
-                    id_mesa: selectedMesa.id_mesa,
-                    id_tipo_eleccion: 1,
-                    votos_nulos: votosNulos,
-                    votos_blancos: votosBlancos,
-                    observaciones,
-                    votos_alcalde: votosAlcalde.filter(v => v.cantidad > 0),
-                    votos_concejal: votosConcejal.filter(v => v.cantidad > 0)
-                })
+                body: formData
             });
 
             const data = await response.json();
@@ -198,6 +233,8 @@ const Transcripcion = () => {
         setVotosNulos(0);
         setVotosBlancos(0);
         setObservaciones('');
+        setImagenActa(null);
+        setPreviewImagen(null);
         if (frentes.length > 0) {
             const votosIniciales = frentes.map(f => ({
                 id_frente: f.id_frente,
@@ -217,38 +254,28 @@ const Transcripcion = () => {
 
     const VotoCard = ({ frente, tipo }) => (
         <div className="bg-white rounded-2xl border-2 border-gray-200 p-5 hover:border-indigo-300 transition-all">
-            <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-3">
+            <div className="flex items-center justify-between gap-4">
+                <div className="flex items-center gap-3 flex-1">
                     <div 
-                        className="w-4 h-10 rounded" 
+                        className="w-12 h-12 rounded-xl flex-shrink-0" 
                         style={{ backgroundColor: frente.color }}
                     />
-                    <div>
+                    <div className="flex-1">
                         <p className="font-bold text-gray-900">{frente.siglas}</p>
                         <p className="text-xs text-gray-500">{frente.nombre}</p>
                     </div>
                 </div>
-                <button
-                    onClick={() => resetVotos(tipo, frente.id_frente)}
-                    className="p-2 hover:bg-red-50 rounded-xl transition"
-                >
-                    <RotateCcw className="w-4 h-4 text-gray-400 hover:text-red-600" />
-                </button>
-            </div>
-            <div className="flex items-center justify-between bg-gray-50 rounded-xl p-3">
-                <button
-                    onClick={() => updateVotos(tipo, frente.id_frente, -1)}
-                    className="w-10 h-10 bg-white rounded-lg hover:bg-red-50 flex items-center justify-center transition"
-                >
-                    <Minus className="w-5 h-5 text-gray-600" />
-                </button>
-                <span className="text-3xl font-black text-gray-900">{frente.cantidad}</span>
-                <button
-                    onClick={() => updateVotos(tipo, frente.id_frente, 1)}
-                    className="w-10 h-10 bg-white rounded-lg hover:bg-green-50 flex items-center justify-center transition"
-                >
-                    <Plus className="w-5 h-5 text-gray-600" />
-                </button>
+                <input
+                    type="text"
+                    inputMode="numeric"
+                    value={frente.cantidad || ''}
+                    onChange={(e) => {
+                        const value = e.target.value.replace(/[^0-9]/g, '');
+                        updateVotos(tipo, frente.id_frente, parseInt(value) || 0);
+                    }}
+                    className="w-24 text-center text-2xl font-bold border-2 border-gray-300 rounded-xl py-3 focus:border-indigo-600 focus:outline-none"
+                    placeholder="0"
+                />
             </div>
         </div>
     );
@@ -541,46 +568,38 @@ const Transcripcion = () => {
 
                                     {/* Votos Nulos y Blancos */}
                                     <div className="grid grid-cols-2 gap-4 mb-8">
-                                        <div className="bg-red-50 border-2 border-red-200 rounded-2xl p-6">
+                                        <div className="bg-red-50 border-2 border-red-200 rounded-2xl p-6 hover:border-red-400 transition">
                                             <label className="block text-sm font-semibold text-red-700 mb-3">
                                                 Votos Nulos
                                             </label>
-                                            <div className="flex items-center justify-between bg-white rounded-xl p-3">
-                                                <button
-                                                    onClick={() => setVotosNulos(Math.max(0, votosNulos - 1))}
-                                                    className="w-10 h-10 bg-red-100 rounded-lg hover:bg-red-200 flex items-center justify-center"
-                                                >
-                                                    <Minus className="w-5 h-5 text-red-600" />
-                                                </button>
-                                                <span className="text-3xl font-black text-gray-900">{votosNulos}</span>
-                                                <button
-                                                    onClick={() => setVotosNulos(votosNulos + 1)}
-                                                    className="w-10 h-10 bg-red-100 rounded-lg hover:bg-red-200 flex items-center justify-center"
-                                                >
-                                                    <Plus className="w-5 h-5 text-red-600" />
-                                                </button>
-                                            </div>
+                                            <input
+                                                type="text"
+                                                inputMode="numeric"
+                                                value={votosNulos || ''}
+                                                onChange={(e) => {
+                                                    const value = e.target.value.replace(/[^0-9]/g, '');
+                                                    setVotosNulos(parseInt(value) || 0);
+                                                }}
+                                                className="w-full text-center text-3xl font-bold border-2 border-gray-300 rounded-xl py-3 focus:border-red-600 focus:outline-none"
+                                                placeholder="0"
+                                            />
                                         </div>
 
-                                        <div className="bg-gray-50 border-2 border-gray-200 rounded-2xl p-6">
+                                        <div className="bg-gray-50 border-2 border-gray-200 rounded-2xl p-6 hover:border-gray-400 transition">
                                             <label className="block text-sm font-semibold text-gray-700 mb-3">
                                                 Votos en Blanco
                                             </label>
-                                            <div className="flex items-center justify-between bg-white rounded-xl p-3">
-                                                <button
-                                                    onClick={() => setVotosBlancos(Math.max(0, votosBlancos - 1))}
-                                                    className="w-10 h-10 bg-gray-200 rounded-lg hover:bg-gray-300 flex items-center justify-center"
-                                                >
-                                                    <Minus className="w-5 h-5 text-gray-700" />
-                                                </button>
-                                                <span className="text-3xl font-black text-gray-900">{votosBlancos}</span>
-                                                <button
-                                                    onClick={() => setVotosBlancos(votosBlancos + 1)}
-                                                    className="w-10 h-10 bg-gray-200 rounded-lg hover:bg-gray-300 flex items-center justify-center"
-                                                >
-                                                    <Plus className="w-5 h-5 text-gray-700" />
-                                                </button>
-                                            </div>
+                                            <input
+                                                type="text"
+                                                inputMode="numeric"
+                                                value={votosBlancos || ''}
+                                                onChange={(e) => {
+                                                    const value = e.target.value.replace(/[^0-9]/g, '');
+                                                    setVotosBlancos(parseInt(value) || 0);
+                                                }}
+                                                className="w-full text-center text-3xl font-bold border-2 border-gray-300 rounded-xl py-3 focus:border-gray-600 focus:outline-none"
+                                                placeholder="0"
+                                            />
                                         </div>
                                     </div>
 
@@ -596,6 +615,66 @@ const Transcripcion = () => {
                                             rows="3"
                                             placeholder="Ingresa cualquier observación sobre esta acta..."
                                         />
+                                    </div>
+
+                                    {/* Imagen del Acta */}
+                                    <div className="mb-8">
+                                        <label className="block text-sm font-semibold text-gray-700 mb-3">
+                                            <div className="flex items-center gap-2">
+                                                <Image className="w-5 h-5 text-indigo-600" />
+                                                Imagen del Acta Física (opcional)
+                                            </div>
+                                        </label>
+                                        
+                                        {!previewImagen ? (
+                                            <label className="flex flex-col items-center justify-center w-full h-48 border-2 border-dashed border-gray-300 rounded-2xl cursor-pointer hover:border-indigo-600 hover:bg-indigo-50 transition-all">
+                                                <div className="flex flex-col items-center justify-center pt-5 pb-6">
+                                                    <Upload className="w-12 h-12 mb-3 text-gray-400" />
+                                                    <p className="mb-2 text-sm text-gray-600 font-semibold">
+                                                        Click para subir imagen del acta
+                                                    </p>
+                                                    <p className="text-xs text-gray-500">
+                                                        JPG, PNG o PDF (máximo 10MB)
+                                                    </p>
+                                                </div>
+                                                <input
+                                                    type="file"
+                                                    className="hidden"
+                                                    accept="image/jpeg,image/jpg,image/png,application/pdf"
+                                                    onChange={handleImagenChange}
+                                                />
+                                            </label>
+                                        ) : (
+                                            <div className="relative border-2 border-gray-200 rounded-2xl p-4">
+                                                <button
+                                                    onClick={() => {
+                                                        setImagenActa(null);
+                                                        setPreviewImagen(null);
+                                                    }}
+                                                    className="absolute top-2 right-2 p-2 bg-red-500 hover:bg-red-600 text-white rounded-full transition-all z-10"
+                                                >
+                                                    <X className="w-4 h-4" />
+                                                </button>
+                                                {previewImagen === 'pdf' ? (
+                                                    <div className="flex items-center justify-center h-48 bg-gray-100 rounded-xl">
+                                                        <div className="text-center">
+                                                            <FileText className="w-16 h-16 text-red-500 mx-auto mb-2" />
+                                                            <p className="text-gray-700 font-semibold">{imagenActa?.name}</p>
+                                                            <p className="text-xs text-gray-500 mt-1">PDF cargado</p>
+                                                        </div>
+                                                    </div>
+                                                ) : (
+                                                    <img
+                                                        src={previewImagen}
+                                                        alt="Preview"
+                                                        className="w-full h-auto max-h-64 object-contain rounded-xl"
+                                                    />
+                                                )}
+                                                <p className="text-sm text-gray-600 mt-2 text-center">
+                                                    {imagenActa?.name}
+                                                </p>
+                                            </div>
+                                        )}
                                     </div>
 
                                     {/* Total General */}

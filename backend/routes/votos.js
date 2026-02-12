@@ -1,8 +1,40 @@
 import express from 'express';
 import pool from '../database.js';
 import { verificarToken } from '../middleware/auth.js';
+import multer from 'multer';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 const router = express.Router();
+
+// Configuración para __dirname en ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Configuración de multer para imágenes de actas
+const storageActas = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, path.join(__dirname, '../uploads/actas'));
+    },
+    filename: (req, file, cb) => {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        cb(null, 'acta-' + uniqueSuffix + path.extname(file.originalname));
+    }
+});
+
+const uploadActa = multer({
+    storage: storageActas,
+    limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+    fileFilter: (req, file, cb) => {
+        const allowedTypes = /jpeg|jpg|png|pdf/;
+        const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+        const mimetype = allowedTypes.test(file.mimetype);
+        if (mimetype && extname) {
+            return cb(null, true);
+        }
+        cb(new Error('Solo se permiten imágenes (JPEG, PNG) o PDF'));
+    }
+});
 
 // GET /api/votos - Obtener todos los registros de votos
 router.get('/', async (req, res) => {
@@ -15,6 +47,9 @@ router.get('/', async (req, res) => {
                 a.votos_nulos,
                 a.votos_blancos,
                 a.estado,
+                a.editada,
+                a.fecha_ultima_edicion,
+                a.imagen_url,
                 m.codigo as codigo_mesa,
                 m.numero_mesa,
                 r.nombre as nombre_recinto,
@@ -392,8 +427,8 @@ router.get('/frentes', async (req, res) => {
 });
 
 // POST /api/votos/registrar-acta - Registrar un acta completa con votos
-router.post('/registrar-acta', verificarToken, async (req, res) => {
-    const {
+router.post('/registrar-acta', verificarToken, uploadActa.single('imagen_acta'), async (req, res) => {
+    let {
         id_mesa,
         id_tipo_eleccion,
         votos_nulos,
@@ -402,9 +437,20 @@ router.post('/registrar-acta', verificarToken, async (req, res) => {
         votos_alcalde,
         votos_concejal
     } = req.body;
+    
+    // Parsear JSON strings si vienen de FormData
+    if (typeof votos_alcalde === 'string') {
+        votos_alcalde = JSON.parse(votos_alcalde);
+    }
+    if (typeof votos_concejal === 'string') {
+        votos_concejal = JSON.parse(votos_concejal);
+    }
 
     // Obtener id_usuario del token JWT decodificado
     const id_usuario = req.usuario.id_usuario;
+    
+    // Obtener URL de la imagen si fue subida
+    const imagen_url = req.file ? `/uploads/actas/${req.file.filename}` : null;
 
     const client = await pool.connect();
 
@@ -433,9 +479,10 @@ router.post('/registrar-acta', verificarToken, async (req, res) => {
                 votos_nulos,
                 votos_blancos,
                 observaciones,
-                estado
+                estado,
+                imagen_url
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             RETURNING id_acta
         `, [
             id_mesa,
@@ -446,7 +493,8 @@ router.post('/registrar-acta', verificarToken, async (req, res) => {
             votos_nulos || 0,
             votos_blancos || 0,
             observaciones || null,
-            'registrada'
+            'registrada',
+            imagen_url
         ]);
 
         const id_acta = actaResult.rows[0].id_acta;
@@ -500,6 +548,114 @@ router.post('/registrar-acta', verificarToken, async (req, res) => {
     }
 });
 
+// PUT /api/votos/acta/:id - Editar un acta existente
+router.put('/acta/:id', verificarToken, async (req, res) => {
+    const { id } = req.params;
+    const {
+        votos_nulos,
+        votos_blancos,
+        observaciones,
+        votos_alcalde,
+        votos_concejal,
+        estado
+    } = req.body;
+
+    const client = await pool.connect();
+
+    try {
+        await client.query('BEGIN');
+
+        // Verificar que el acta existe
+        const actaExistente = await client.query(
+            'SELECT * FROM acta WHERE id_acta = $1',
+            [id]
+        );
+
+        if (actaExistente.rows.length === 0) {
+            throw new Error('Acta no encontrada');
+        }
+
+        // Calcular totales
+        const votosValidosAlcalde = votos_alcalde?.reduce((sum, v) => sum + (v.cantidad || 0), 0) || 0;
+        const votosValidosConcejal = votos_concejal?.reduce((sum, v) => sum + (v.cantidad || 0), 0) || 0;
+        const votosValidos = votosValidosAlcalde + votosValidosConcejal;
+        const votosTotales = votosValidos + (votos_nulos || 0) + (votos_blancos || 0);
+
+        // Actualizar el acta existente
+        await client.query(`
+            UPDATE acta
+            SET votos_totales = $1,
+                votos_validos = $2,
+                votos_nulos = $3,
+                votos_blancos = $4,
+                observaciones = $5,
+                estado = COALESCE($6, estado),
+                editada = TRUE,
+                fecha_ultima_edicion = CURRENT_TIMESTAMP
+            WHERE id_acta = $7
+        `, [
+            votosTotales,
+            votosValidos,
+            votos_nulos || 0,
+            votos_blancos || 0,
+            observaciones || null,
+            estado,
+            id
+        ]);
+
+        // Eliminar votos anteriores
+        await client.query('DELETE FROM voto WHERE id_acta = $1', [id]);
+
+        // Insertar nuevos votos de alcalde
+        if (votos_alcalde && votos_alcalde.length > 0) {
+            for (const voto of votos_alcalde) {
+                if (voto.cantidad > 0) {
+                    await client.query(`
+                        INSERT INTO voto (id_acta, id_frente, cantidad, tipo_cargo)
+                        VALUES ($1, $2, $3, $4)
+                    `, [id, voto.id_frente, voto.cantidad, 'alcalde']);
+                }
+            }
+        }
+
+        // Insertar nuevos votos de concejal
+        if (votos_concejal && votos_concejal.length > 0) {
+            for (const voto of votos_concejal) {
+                if (voto.cantidad > 0) {
+                    await client.query(`
+                        INSERT INTO voto (id_acta, id_frente, cantidad, tipo_cargo)
+                        VALUES ($1, $2, $3, $4)
+                    `, [id, voto.id_frente, voto.cantidad, 'concejal']);
+                }
+            }
+        }
+
+        await client.query('COMMIT');
+
+        res.json({
+            success: true,
+            message: 'Acta editada exitosamente',
+            data: {
+                id_acta: id,
+                votos_totales: votosTotales,
+                votos_validos: votosValidos,
+                editada: true
+            }
+        });
+
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('Error al editar acta:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Error al editar acta',
+            error: error.message
+        });
+    } finally {
+        client.release();
+    }
+});
+
 // GET /api/votos/acta/:id - Obtener detalle de un acta
 router.get('/acta/:id', async (req, res) => {
     const { id } = req.params;
@@ -535,6 +691,7 @@ router.get('/acta/:id', async (req, res) => {
         const votosResult = await pool.query(`
             SELECT 
                 v.id_voto,
+                v.id_frente,
                 v.cantidad,
                 v.tipo_cargo,
                 f.nombre as nombre_frente,
